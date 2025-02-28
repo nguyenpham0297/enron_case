@@ -1,0 +1,716 @@
+---
+title: "Enron Email Analysis"
+course: "R for Big Data"
+author: "Phuc Nguyen PHAM"
+instructor: "Pr. Charles Bouveyron"
+date: "2024-11-24"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Introduction
+
+The Enron scandal, one of the largest corporate frauds in history, provides an important case study for data analysis. This project aims to
+analyze the Enron email data to uncover patterns, identify key
+contributors, and provide insights into communication dynamics within
+the company.
+
+## 2. Objectives of the Project
+
+The goal of the project is to explore and analyze various aspects of the email dataset from the conversations of Enron employees during the period before and during the company’s bankruptcy. The main analyses will include:
+
+- Identifying the most active employees in the Enron email database.
+- Analyzing user roles and their influence on communication.
+- Exploring the temporal dynamics of emails, including correlations with significant public events.
+- Performing a basic content analysis of email subjects to extract common themes.
+
+## 3. Data Preparation and Cleaning
+
+### 3.1 Loading and Inspecting Data
+
+```{r load-data}
+# Load data
+load(file = "Enron.Rdata")
+```
+
+In the Environment section, we notice that there are a total of 4 tables, of which 3 main tables according to the assignment are "employeelist", "message", and "recipientinfo".
+
+```{r echo=FALSE}
+knitr::include_graphics("picture_1.png")
+```
+
+### 3.2 Data cleaning and ETL process
+
+The purpose of the process is to clean the data, transform the tables, connect the tables into a star model, and denormalize the data to make it suitable for retrieval and analysis.
+
+We will have a first look at each table
+
+```{r}
+head(employeelist)
+head(message)
+head(recipientinfo)
+str(referenceinfo)
+```
+
+#### 3.2.1 Converting the Employeelist Table to the Emails Table
+
+First, when we look at the "employeelist" table, we notice that this table contains 4 columns just to describe the employee's emails.
+
+Therefore, we will unpivot them to transform into a single email column. However, this will cause the employee ID primary key (eid) to appear multiple times and no longer be unique. Additionally, each employee can have multiple emails, but each email can only be owned by one employee, so we can still fully retrieve the employee once we know their email.
+
+Thus, the proposed solution is to create a new table named "Emails", with the primary key being the employee's email.
+
+```{r}
+#install the package
+library(dplyr)
+library(tidyr)
+library(lubridate)
+```
+
+```{r}
+#Create Emails Table
+
+#First of all, we will do the data transformation for the "employeelist" table. 
+
+#We change the type of the “status” column to character instead of factor.
+employeelist$status = as.character(employeelist$status)
+
+#We also change the “eid” column from "num" to "int" because IDs are whole numbers and do not have decimal numbers.
+employeelist$eid = as.integer(employeelist$eid)
+
+#We will create a new table, namely "Emails":
+emails = employeelist %>% pivot_longer( #Unpivot all the emails columns
+  cols = c(Email_id, Email2, Email3, EMail4),
+         names_to = "email",   
+         values_to = "email_id") %>% #We rename the new column to "email_id"
+  
+  #We don't select the "folder" column as it is useless
+  select(email_id, eid, firstName, lastName, status) %>% 
+  
+  #Remove rows with empty emails, because there are some cases where some people only have one email, so the Email2, Email3, Email4 columns will be empty.
+  filter(email_id != "") %>% 
+  
+  #We rename the "eid" column to "employee_id" so it will be easier to read
+  rename(employee_id = eid) %>% 
+  
+  #For the "status" column, we will re-label it, if the employees don't have the title (status is NA or empty), they will be labeled as "Unknown", if they have it, we will keep the status's value.
+  mutate(status = trimws(status)) %>% 
+  mutate(status = ifelse(
+    is.na(status) | 
+    toupper(status) == "N/A" | 
+    toupper(status) == "NA" | 
+    status == "" | 
+    is.null(status), "Unknown", status ))
+
+#We will remove the "employeelist" to save the stockage
+rm(employeelist)
+
+print(emails)
+```
+
+Some data transforming processes have been executed, such as changing the label of the "status" column and removing the "folder" column because it is not useful and does not provide any information.
+
+We will check whether these emails are unique and if there are cases where one email is used by two employees.
+
+```{r}
+#Check if there are any duplication for the "email_id" column 
+any(duplicated(emails$email_id))
+
+# We create a query to make a list of emails that are possessed by more than one employee.
+duplicated_emails = emails %>% 
+  group_by(email_id) %>% 
+  filter(n_distinct(employee_id) > 1)
+
+# Check whether the emails are used exclusively by one employee
+nrow(duplicated_emails) ==0
+
+#Remove the table that we have created from the environment to save space
+rm(duplicated_emails)
+
+```
+
+From the results, we can see that this new "emails" table can be used as the primary key "email_id" is unique , and there are no cases where multiple employees use the same email. This can help us retrieve
+employee information from the emails they use.
+
+#### 3.2.2 Transforming the remaining 3 tables into one table named "Activities"
+
+We can denormalize the 3 tables "message", "recipientinfo", and "referenceinfo" into a new table to serve the analysis step as it will improve the read performance of the database.
+
+First, we will check if the "mid" column in the "referenceinfo" table is duplicated, as typically an email represents a single unique content, so there cannot be two contents in one email.
+
+Then, the "mid" column in the "referenceinfo" table will be used as the primary key to merge with the "message" table.
+
+After that, in the "message" table, "mid" is also the primary key, so it can be used to merge with the "recipientinfo" table. We will also remove the "message_id" column in the "message" table because it does not provide any useful information.
+
+```{r}
+#Create the "activities" table
+
+#Check if there is any duplication for the "mid" column in the reference table
+any(duplicated(referenceinfo$mid))
+
+#Now we will join the tables
+
+#We use the left join function to 
+merged_message = left_join(message, referenceinfo, by = "mid")
+
+merged_recipient = left_join(recipientinfo, merged_message, by = "mid")
+
+activities = merged_recipient %>%
+  mutate(activity_id = row_number())
+  
+#We wil create the activities table
+activities = activities %>%
+  
+  #First of all, we change the types and names of the columns (email of recipient, email of sender ans id of message, type of recipient) so we can read easily
+  mutate(rvalue = as.character(rvalue)) %>%
+  rename(email_recipient = rvalue) %>%
+  mutate(sender = as.character(sender)) %>%
+  rename(email_sender = sender) %>%
+  mutate(rtype = as.character(rtype)) %>%
+  rename(recipient_type = rtype) %>%
+  mutate(mid = as.integer(mid)) %>%
+  rename(mes_id = mid) %>%
+  
+  #Then, we remove some columns that are unnecessary.
+  select(-rfid) %>%
+  select(-rid) %>%
+  select(-message_id) %>%
+  
+  #We also transform the date type date, and create 3 columns to express the year, month and day of the message
+  mutate(date = as.Date(date, format = "%Y-%m-%d")) %>%
+  mutate(year = year(date),month = month(date),day = day(date)) %>%
+  mutate(year = as.integer(year), month = as.integer(month), day = as.integer(day)) %>%
+  
+  #For the "subject" column, we know that we can send, respond, or forward a message, so we will create 2 columns : 
+  
+  #A subject type column which helps to categorizes the subject, if it begins with "RE:", so it means people responded an email, if it begins with "FW:", it means people forwarded an email, if not, it means people sent an email. We also use "grepl" for matching and replacement, and ignore.case to ignore lower case and upper case differences. 
+  mutate(subject_type = ifelse(grepl("^RE:", subject,ignore.case = TRUE), "RE",
+                        ifelse(grepl("^FW:", subject, ignore.case = TRUE), "FW","Send"))) %>%
+  
+  #We create the subject content column in order to show only the content of the subject, regardless it is a normal, responded or forwarded email, and we will trim and make it to be a lowercase.
+  mutate(subject_content = ifelse(subject_type == "RE", sub("^RE:", "", subject, ignore.case = TRUE),
+                           ifelse(subject_type == "FW", sub("^FW:", "", subject, ignore.case = TRUE), subject))
+  ) %>%
+  mutate(subject_content = trimws(subject_content)) %>%
+  mutate(subject_content = tolower(subject_content)) %>%
+  select(activity_id, everything())
+
+#Remove the table to save space
+rm(message, merged_message,recipientinfo,merged_recipient, referenceinfo)
+
+#Show the result
+head(activities)
+```
+
+Then, we will create our own function to check if the data is cleaned or not. It will be useful because we can check if there is any data having the value of NA, NULL or the empty value.
+
+```{r}
+is_cleaned = function(x) { !(
+  anyNA(x) | 
+  any(toupper(x) == "N/A") | 
+  any(toupper(x) == "NA") | 
+  any(x == "") | 
+  any(is.null(x))
+)}
+```
+
+We changed the name of the "mesid" column, it will be "mes_id". We check if the data are well cleaned:
+
+```{r}
+is_cleaned(activities$mes_id)
+is_cleaned(emails$email_id)
+is_cleaned(emails$employee_id)
+is_cleaned(activities$email_sender)
+```
+
+After completing the cleaning and ETL process, the data is now well-structured with appropriately typed columns. We will proceed to the data exploration phase to examine some statistics and further refine the data if necessary.
+
+## 4. Data exploration and statistics
+
+First of all, we need to see the summary of each table created:
+
+```{r}
+summary(activities)
+```
+
+```{r}
+summary(emails)
+```
+By summarizing the two tables, we can see a few key points : 
+
+- The date column in the activities table might include some incorrect data (like dates from the year 0001 and 2044). 
+
+- Since our focus is on data from 1999 to 2002, we’ll exclude these erroneous data (e.g., dates in the year 0001 and 2044) in future time-based analyses. Both tables contain numerous character fields, suggesting a lot of textual data. 
+
+- The emails table centers on employee information, whereas the activities table captures detailed email activities.
+
+We start to explore the data by making some simple descriptive analysis:
+
+### 4.1. Status of 149 employees
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+```
+
+First of all, we see the distribution of status of 149 employees: 
+
+```{r}
+#Create the table to calculate the percentage of each status
+status_percentage = emails %>%
+  distinct(employee_id, .keep_all = TRUE) %>%
+  group_by(status) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = round(count / sum(count) * 100)) %>%
+  arrange(desc(percentage))
+
+# Create the pie chart of status
+
+#This library will help to sort the portion
+library("forcats") 
+#We sort the "status" by the value of "percentage"
+Status = fct_infreq(status_percentage$status,w= status_percentage$percentage)
+
+ggplot(status_percentage, aes(x="", y=percentage, fill= Status))+
+  geom_bar(width = 1, stat = "identity", color = "white")+ 
+  coord_polar("y", start=0, direction = -1)+
+  theme_minimal()+
+  ggtitle("Status Distribution of 149 Employees") +
+  geom_text(aes(x=1.3, label=paste(percentage,"%")),position = position_stack(vjust=0.5))
+```
+
+Through the chart, we can see that nearly 30% of the employees hold the position of Employee, making up the largest portion. At the same time, about 1/5 of the employees have an "Unknown" status, indicating that there may be a lot of information that has been deleted or hide to cover up. High-level management positions such as Vice President, Director, and Manager also account for a significant proportion.
+
+### 4.2. Most popular messages
+
+Now we will see some messages which appear the most in the database:
+
+```{r}
+most_popular_message_id = activities %>%
+  group_by(mes_id) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) %>%
+  slice_head(n=10) 
+
+most_popular_message =  left_join(most_popular_message_id, activities, by = "mes_id") %>% 
+  select(mes_id, count, subject) %>%  
+  distinct(mes_id, .keep_all = TRUE) %>% 
+  arrange(desc(count)) 
+  
+most_popular_message_plot = ggplot(most_popular_message, aes(x = reorder(interaction(mes_id, subject),count) , y = count)) +
+  geom_bar(stat = "identity", fill = "#87CEEB") +
+  labs(title = "Top 10 popular messages",
+       x = "Messageid - Name of the message",
+       y = "Number of message") +
+  coord_flip() +
+  geom_text(aes(label = count), vjust = 0)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Since the data wasn’t clear when displayed, I took a screenshot of the chart in full window mode:
+```{r echo=FALSE}
+knitr::include_graphics("most_popular_message_plot.png")
+```
+
+From this chart, we can see that there are 5 different messages sharing the same subject "Associate/Analyst Program", and they even have the same frequency of occurrence. These could be spam emails.
+
+### 4.3. Most popular subjects
+
+We do some analysis about most popular subjects and see if there is any difference with most popular messages :
+
+```{r}
+most_popular_subject = activities %>%
+  filter(subject_content != "") %>%
+  group_by(subject_content) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) %>%
+  slice_head(n=15) 
+
+
+most_popular_subject_plot = ggplot(most_popular_subject, aes(x = reorder(subject_content,count) , y = count)) +
+  geom_bar(stat = "identity", fill = "#87CEEB") +
+  labs(title = "Most popular subject",
+       x = "Subject",
+       y = "Number of message") +
+  coord_flip() +
+  geom_text(aes(label = count), vjust = 0)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Since the data wasn’t clear when displayed, I took a screenshot of the chart in full window mode:
+```{r echo=FALSE}
+knitr::include_graphics("most_popular_subject_plot.png")
+```
+
+From the chart of most popular subjects, we can see that it generally has a higher volume compared to the chart of most popular messages. This is normal because one subject can be repeated many times. Each time it
+is sent, responded to, or forwarded, it will be recorded with a new message ID.
+
+Another point to see is some subjects possibly related to  Enron Online (EOL), an energy trading platform created by them (for example "online trading simulation"), a significant part of the company’s operations and played a role in the scandal. According to the [Applied Corporate Governance page](https://www.applied-corporate-governance.com/wp-content/uploads/2018/04/Enron-Case-Study.pdf), "...its hidden cost was the great increase in capital requirement of the trading business. This became a dramatic problem later. Meanwhile, it gave Enron the opportunity to manipulate the market.". 
+
+## 5. Data analysis
+
+### 5.1 The most active Enron employees in the email database
+
+We will identify the most active employees in the company using two approaches: by the number of emails sent and by the number of employees with the highest frequency of sending messages:
+
+- Vision 1: Most active senders
+```{r}
+most_send_emails = activities %>%
+  group_by(email_sender) %>%
+  summarise(count =n()) %>%
+  arrange(desc(count)) %>%
+  slice_head(n = 10)
+
+#Create the histogram
+most_send_emails_plot =  
+ggplot(most_send_emails, aes(x = reorder(email_sender, count), y = count)) +
+  geom_bar(stat = "identity", fill = "#87CEEB") +
+  labs(title = "Top 10 email senders",
+       x = "Sender",
+       y = "Number of email") +
+  coord_flip() +
+  geom_text(aes(label = count), hjust = 0) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Since the data wasn’t clear when displayed, I took a screenshot of the chart in full window mode:
+```{r echo=FALSE}
+knitr::include_graphics("most_send_emails_plot.png")
+```
+
+- Vision 2: Most active Enron's employees
+```{r}
+most_send_employee = activities %>%
+  left_join(emails,by = c("email_sender" = "email_id"))%>%
+  mutate(full_name = paste(firstName,lastName)) %>%
+  group_by(full_name) %>%
+  summarise(count =n()) %>%
+  arrange(desc(count)) %>%
+  slice_head(n=15) 
+
+most_send_employee_plot = ggplot(most_send_employee, aes(x = reorder(full_name, count), y = count)) +
+  geom_bar(stat = "identity", fill = "darkblue") +
+  labs(title = "Most active Enron's employees",
+       x = "Name of employee",
+       y = "Number of email sent") +
+  coord_flip() +
+  geom_text(aes(label = count), hjust = 0) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Since the data wasn’t clear when displayed, I took a screenshot of the chart in full window mode:
+```{r echo=FALSE}
+knitr::include_graphics("most_send_employee_plot.png")
+```
+
+In these 2 charts, Jeff Dasovich is the most active employee who sent the most emails, with a total of 65675 emails.
+
+Additionally, we have identified that there are nearly 168000 messages, which constitute a significant portion of the total number of messages, where the sender’s name cannot be determined. In contrast, the number of emails with unidentified senders is not as high (as seen in the first table where there are no ‘NA’ emails). This indicates that there are messages where the email can be identified but the sender’s name cannot be determined. This suggests that the activities table may contain messages with emails outside the list of the 149 employees’ emails.
+
+### 5.2 Analysis of the role of the different users
+
+We will examine whether there is any difference between the number of emails sent and received across different statuses:
+
+```{r}
+#Calculate sent emails per status
+sent_emails = activities %>%
+  group_by(email_sender) %>%
+  summarise(sent_count = n()) %>%
+  left_join(emails, by = c("email_sender" = "email_id")) %>%
+  
+  #After the joining process, there are cases that the status has the NA value because some emails don't exist in the "emails" table, so we have to switch those NA values to "Unknown", and since it creates the noise, so we will drop this value
+  replace_na(list(status = "Unknown")) %>% 
+  filter(status != "Unknown") %>% 
+  
+  #There are a lot of extreme value (noise) so we decided to select the number of sent email which is less than 6000 so see easily the chart
+  filter(sent_count <= 6000)  
+
+#Calculate received emails per status
+received_emails = activities %>%
+  group_by(email_recipient) %>%
+  summarise(received_count = n()) %>%
+  left_join(emails, by = c("email_recipient" = "email_id")) %>%
+  replace_na(list(status = "Unknown")) %>% 
+  filter(status != "Unknown") %>% 
+  
+  #There are also a lot of extreme value so the number of sent email which is less than 8000 is selected to see easily the chart
+  filter(received_count <= 8000)
+
+#Create box plot for sent emails
+sent_plot = ggplot(sent_emails, aes(x = status, y = sent_count)) +
+  geom_boxplot(fill = "lightblue") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Distribution of emails Sent by status", x = "Status", y = "Number of emails sent")
+
+#Create box plot for received emails
+received_plot = ggplot(received_emails, aes(x = status, y = received_count)) +
+  geom_boxplot(fill = "lightgreen") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Distribution of emails received by status", x = "Status", y = "Number of emails received")
+
+sent_plot
+received_plot
+```
+
+From the plot of distribution of emails sent, CEOs have the highest variation and median number of emails sent, showing that they were highly active in communications. Employees, managers, and other roles such as traders and vice presidents show more moderate distributions in the number of emails sent. And from the distribution of emails received, managing directors and presidents typically received more emails, as indicated by their higher medians and broader distribution ranges. This could imply that these roles are central to the communication.
+
+### 5.3. Temporal dynamic of the messages
+
+##Analyses from section 5.3 onwards will have code integrated into the "server" part of the Shiny application. This is because we will add widgets along with multiple filters to the charts to select meaningful target data.
+
+Here is the chart of the number of message over time:
+```{r echo=FALSE}
+knitr::include_graphics("message_over_time.png")
+```
+
+The data indicates an increase in the number of messages during December 2000 and June 2001. Following these peaks, there was a noticeable decline. Ultimately, the volume of messages reached its highest point in October and November 2021, and then in February 2002. This pattern suggests significant fluctuations in communication activity. 
+
+When we see with the [Enron Timeline](https://www.agsm.edu.au/bobm/teaching/BE/Enron/timeline.html), we can see that: 
+
+- In 12/2000: "Enron announces that president and chief operating officer Jeffrey Skilling will take over as chief executive in February. Kenneth Lay will remain as chairman". This major leadership change could possibly contribute to the high communication.
+
+- In 06/2001: This is the Jeffrey Skilling's appointment as CEO (replacing Kenneth Lay). The leadership transition could also triggered internal discussions.
+
+- Most important, in 10-11/2001: This peak correlates with Enron's collapse, when in 10/2001, Enron revealed significant losses and debts, and in 11/2001, Enron shares plunge below $1 and Enron filed for bankruptcy. The chaotic situation would lead to a very high internal communication.
+
+- We still can see that after 2001, in 02/2002 there was a very high peak, the reason could due to the internal investigation into Enron’s collapse, known as the Powers Report. This report exposed the involvement of executives and the failure to manage the company properly, leading to many executives being called to testify before Congress.
+
+### 5.4. Temporal dynamic of the sent emails by status
+
+When using the chart of sent emails categorized by status, combined with the chart of most discussed subjects over time, we can trace and explain some behaviors of the statuses.
+
+For instance, when filtering for the year 2001 and the status of CEO, we can see an unusual increase in the number of emails sent in August 2001, this could be explain due to the Skilling's resignation announcement, and Lay is named CEO:
+```{r echo=FALSE}
+knitr::include_graphics("email_status_ceo_2001.png")
+```
+
+
+When combining the analysis with the chart of most discussed subjects over time, we can easily see that there are also about 4,700 emails with the subject "associate/analyst program". It is very likely that the CEOs sent emails on this topic:
+```{r echo=FALSE}
+knitr::include_graphics("discussed_subject_08_2001.png")
+```
+
+When filtering the data by the status of "Employee", we see that in October 2021, the number of emails sent also increased significantly, coinciding with the time of Enron’s collapse:
+```{r echo=FALSE}
+knitr::include_graphics("email_status_employee_2001.png")
+```
+
+### 5.5. Content analysis
+
+We will see most discussed subjects over time, this is a upgrade version of the old most popular subject chart.
+
+When using filters for time and subject, we can recognize many topics related to the Enron scandal that appear. Although a lot of emails may have been destroyed by the auditing firm Arthur Andersen, there are still many topics showing Enron’s activities during the period when the company was about to go bankrupt (topics related to FERC, the California electricity crisis…):
+```{r echo=FALSE}
+knitr::include_graphics("discussed_subject_01_12_2001_ferc.png")
+knitr::include_graphics("discussed_subject_01_12_2001.png")
+knitr::include_graphics("discussed_subject_12_2000.png")
+```
+
+In the section 5.3, we know that the number of messages increased anomalously in February 2002. When using this chart above to analyze the content more deeply, we found that a large number of these messages were related to “online trading simulation.” This could be linked to Enron’s energy trading platform, Enron Online (EOL), which was also a factor in the scandal as Enron used it to manipulate electricity market prices:
+```{r echo=FALSE}
+knitr::include_graphics("discussed_subject_02_2002.png")
+```
+
+
+## 6. Create the Shiny application
+
+```{r}
+library(shiny)
+library(shinyWidgets)
+library(shinydashboard)
+library(dslabs)
+library(tidyverse)
+library(plotly)
+```
+
+### 6.1. Create the UI
+
+In this part, we will create the UI for the Shiny application. We will create a dashboard page with a sidebar menu that shows a list of charts. Each time we click on a bar, it will display the corresponding chart.
+
+```{r UI}
+ui = dashboardPage(
+  dashboardHeader(title = "Enron emails"),
+  dashboardSidebar(
+    
+    #We create the side bar Menu, the tab Name will help to connect with the tab Item, which helps to access to the right chart each time we click on a menu item
+    sidebarMenu(
+      menuItem("Most active emails", tabName = "most_send"),
+      menuItem("Most active employees", tabName = "most_active"),
+      menuItem("Most active emails by status", tabName = "emails_status"),
+      menuItem("Frequency of messages overtime", tabName = "frequency"),
+      menuItem("Number of emails sent by status", tabName = "sent_status_overtime"),
+      menuItem("Most discussed subjects", tabName = "subject_overtime"))),
+  dashboardBody(
+     tabItems(
+       
+      #We create the UI for the question of most active mails
+      tabItem(tabName = "most_send", fluidRow(
+        box(plotOutput("most_send"), width = 12))),
+      
+      #Then, we will create the UI for the question of most active mails by status and add 2 action buttons
+      tabItem(tabName = "emails_status", fluidRow(
+        actionButton("status_sent", "Show sent emails plot"),
+        actionButton("status_received", "Show received emails plot"),
+        box(plotOutput("emails_status"), width = 12))),
+      
+      #We create the UI for the question of most active employees
+      tabItem(tabName = "most_active", fluidRow(
+        box(plotOutput("most_active_employees"), width = 12))),
+      
+      #Here is the UI for the question of temporal dynamic of the messages
+      tabItem(tabName = "frequency",fluidRow(
+        box(sliderInput("year_range", "Choose the periode:", min = 1999, max = 2002, value = c(2000, 2001)), width = 9, height = "100px"),
+        box(plotOutput("messages_overtime"), width = 12))),
+      
+      #Create the UI for the sent emails by status overtime
+      tabItem(tabName="sent_status_overtime",fluidRow(
+        box(sliderInput("year_range_1", "Select the year range:", min = 1999, max = 2002, value = c(2000,2001)), height = "100px"), 
+        box(selectInput("status_choice","Select the status (multiple choice):", choices = unique(emails %>% distinct(status) %>% filter(status != "Unknown")), multiple = TRUE, selected = "CEO"), height = "100px"),
+        box(plotOutput("sent_status_overtime"), width = 12))),
+      
+      #Create the UI for the most popular subject over time
+      tabItem(tabName = "subject_overtime",fluidRow(
+        
+        #We add a slicer to choose the month range
+        box(sliderInput("month_range", "Select the month range:", min = 1, max = 12, value = c(9,10)), height = "100px", width = 4),
+        #Add a choice box to choose the year
+        box(selectInput("year_choice","Select the year:", choices = c(1999,2000,2001,2002), multiple = FALSE, selected = 2001), height = "100px", width = 4),
+        #Add a text input to filter the subject containing the words that we input
+        box(textInput("keyword", "Select the keywords:","online"), height = "100px", width = 4),
+        box(plotOutput("subject_overtime"), width = 12)
+      )
+
+  ))))
+```
+
+### 6.2. Create the server
+
+In the server, we put and integrate the calculation part and the plot part because there are some charts that need the widgets to filter and connect with the UI, creating interactive chart.
+```{r Server}
+server = function(input, output) {
+  
+  output$most_send = renderPlot({
+    most_send_emails_plot
+  })
+  
+  output$emails_status = renderPlot({
+    sent_plot
+  })
+
+  observeEvent(input$status_sent, {
+    output$emails_status = renderPlot({ sent_plot })
+  })
+  
+  observeEvent(input$status_received, {
+    output$emails_status = renderPlot({ received_plot })
+  })
+  
+  output$most_active_employees = renderPlot({
+    most_send_employee_plot
+  })
+  
+  output$messages_overtime = renderPlot({
+    
+    #We create the calculation and the plot for the question of temporal dynamic of the messages
+    messages_overtime_count = activities %>%
+      filter(year >= input$year_range[1] & year <= input$year_range[2]) %>%
+      group_by(date) %>%
+      summarise(count = n()) %>%
+      mutate(year = year(date))
+    
+    #Make the plot for the calculation above
+    messages_overtime_plot = ggplot(data = messages_overtime_count, aes(x = date, y = count)) +
+      geom_line(color = "#3E4E68") +
+      labs(title = "Temporal dynamic of the messages",
+           y = "Number of messages",
+           x = "Date") +
+      scale_x_date(date_labels = "%Y-%m", date_breaks = "1 month") +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+    
+    messages_overtime_plot})
+  
+  #We create the calculation and plot for the sent mails by status overtime
+  output$sent_status_overtime =renderPlot({
+    
+    #Create the calculation of sent emails over time
+    sent_overtime = activities %>%
+      filter(year >= 1999 & year <= 2002) %>%
+      left_join(emails, by = c("email_sender" = "email_id")) %>%
+      filter(status != "Unknown") %>%
+      group_by(date,status) %>%
+      summarise(count = n()) %>%
+      ungroup()
+    
+    #We have to integrate the year range in the calculation 
+    filtered_sent_status = sent_overtime %>%
+      filter(year(date) >= input$year_range_1[1] & year(date) <= input$year_range_1[2]) %>%
+      filter(status %in% input$status_choice)
+    
+    #Make the plot of sent emails over time
+    sent_overtime_plot = ggplot(data = filtered_sent_status, aes(x=date, y=count, color = status)) +
+  geom_line() +
+  labs(title = "Temporal dynamic of the sent emails",
+       y = "Number of message",
+       x = "Date") +
+    scale_x_date(date_labels = "%Y-%m", date_breaks = "1 month") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+    sent_overtime_plot
+  })
+  
+  #Create the calculation and plot for most popular subjects overtime
+  output$subject_overtime = renderPlot({
+    
+    most_popular_subject = activities %>%
+    filter(year %in% input$year_choice) %>%
+    filter(subject_content != "") %>%
+    group_by(date,subject_content) %>%
+    summarize(count = n()) %>%
+    arrange(desc(count)) %>%
+    slice_head(n=15) 
+    
+    most_popular_subject_1 = most_popular_subject %>%
+    filter(month(date) >= input$month_range[1] & month(date) <= input$month_range[2]) 
+    
+    #We will make a condition, if the keyword is empty, we won't filter data, if we input some words in the box, it will match and filter the subject containing those words
+    if (input$keyword != "") 
+      {most_popular_subject_1 = most_popular_subject_1 %>%
+            filter(grepl(input$keyword,subject_content))}
+
+    most_popular_subject_2 = most_popular_subject_1 %>%
+    group_by(subject_content) %>%
+    summarise(count = sum(count)) %>%
+    arrange(desc(count)) %>%
+    slice_head(n = 15)
+    
+    #Create the plot of most popular subjects
+    most_popular_subject_plot = ggplot(most_popular_subject_2, aes(x = reorder(subject_content,count) , y = count)) +
+  geom_bar(stat = "identity", fill = "#87CEEB") +
+  labs(title = "Most popular subject",
+       x = "Subject",
+       y = "Number of message") +
+  coord_flip() +
+  geom_text(aes(label = count), vjust = 0)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+    
+    most_popular_subject_plot})
+  
+}
+
+
+```
+
+### 6.3. Run the Shiny application
+```{r Shiny}
+shinyApp(ui, server)
+```
+## 7. Conclusion
+
+The Enron email dataset provides critical insights into the events leading to one of the most infamous corporate scandals in history. Spikes in activity can be linked to significant occurrences like the California energy crisis, the SEC inquiry, and the final bankruptcy filing by analyzing email communication patterns. Increased internal activity, probably related to damage management, fraud concealment, and litigation strategy, is reflected in the spike in email traffic during critical months. This investigation demonstrates how organizational behavior during crises can be uncovered using communication data. 
+
+Analysis is limited by the large number of emails in the Enron email dataset that have unidentifiable employees or missing subjects. Network analysis can be used in future research to find hidden patterns. We can gain a deeper insight of organizational dynamics and information flow by examining CC, BCC, reply chains, and forwarded emails to uncover direct communication and covert interactions.
