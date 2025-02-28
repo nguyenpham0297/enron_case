@@ -1,1 +1,3 @@
-![Uploading Enron_shiny.gif…]()
+![Enron_shiny][images/enron/Enron_shiny.gif]
+
+
