@@ -1,3 +1,3 @@
-![Enron_shiny][images/enron/Enron_shiny.gif]
+(Enron_shiny)[enron_case/comment_prof.png]
 
 
