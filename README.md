@@ -62,6 +62,4 @@ To run the Shiny app:
 ![Enron_shiny](comment_prof.png)
 *Comment from the professor evaluating the project.*
 
----
-This **R and Shiny** project provides an interactive platform to explore Enron’s email data, offering **deep analytical insights** into communication patterns during one of the biggest corporate scandals in history.
 
